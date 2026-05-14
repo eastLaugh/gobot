@@ -1,96 +1,47 @@
-## The Finals Cafe Channel Bot (Go) - notes
+# Gobot
 
-### OneBot / NapCat current state (this server)
+不是 QQBot，不是问答机器人，不需要被 @，不需要 `/` 指令。
 
-- **NapCat runs in Docker**: container name `napcat` (image `mlikiowa/napcat-docker:latest`).
-- **WebUI**: exposed on **`6099`**.
-- **OneBot (HTTP Server)**: exposed on **`3000`**.
-- **OneBot (WebSocket Server)**: expose **`3001`** for reverse-WS client connection.
+它是一个**活的群友**——你启动，它进群，自己看消息、自己决定要不要插话、自己记住事情。会水群、会接梗、会聊骚，有自己的人格。
 
-### What was broken and why
+启动之后你不用管。
 
-- When the HTTP server was configured to bind **`127.0.0.1` inside the container**, calls from the host via Docker port mapping failed (reset/empty reply).
-- Binding **`0.0.0.0`** inside the container is required so Docker can forward traffic to the container network interface.
+## 快速运行
 
-### Working OneBot HTTP details (verified)
-
-- **Base URL**: `http://127.0.0.1:3000`
-- **Auth**: `Authorization: Bearer <ONEBOT_TOKEN>`
-- **API style**:
-  - Works with **direct endpoints** like `GET /get_login_info`, `GET /get_group_list`
-  - **Does NOT** work with `/onebot/v11/...` (returns "不支持的Api onebot")
-
-Example:
-
-```bash
-curl -sS -m 10 'http://127.0.0.1:3000/get_login_info' \
-  -H 'Authorization: Bearer <ONEBOT_TOKEN>'
+```plaintext
+AI 你好，请帮我部署此项目。我的群号是 ....... 我的群是 ......... 我需要一个软萌妹子......
 ```
 
-Get group list:
+## 它会做什么
+
+- **旁观**：默认不说话，按攒消息 / 等冷却的方式决定何时观察一次。
+- **插话**：判断与自己有关、或者只是想凑热闹时，自己发群消息。
+- **记忆**：跨 session 保留对群、群成员、文化梗的长期印象，由它自己整理、压缩、更新。
+- **使用工具**：查资料、查 Steam 在线、查 The Finals 排名、戳人、抓网页等，全部模型自主决定。
+- **多群独立人格**：每个群一份 prompt、一份记忆文件，互不串味。
+
+它**不**做：监听指令、提供命令菜单、被动一问一答、@检测。
+
+---
+
+## 跑起来
+
+需要：
+
+- Go 1.26+
+- 一个能连上的 **OneBot 11** 反向 WebSocket 实现
+- 一个 **OpenAI 兼容** 的大模型 API
+
+步骤：
 
 ```bash
-curl -sS -m 20 'http://127.0.0.1:3000/get_group_list' \
-  -H 'Authorization: Bearer <ONEBOT_TOKEN>'
-```
-
-### Notes about "seeing group content"
-
-- OneBot HTTP can query things like **login info** and **group list**.
-- **Chat content/history is not typically pullable** via OneBot HTTP. Usually you must configure **event push** (HTTP callback or WS/reverse-WS) and then your bot service receives messages in real time.
-- NapCat container logs may show incoming messages, but that is not a reliable/complete way to build a bot.
-
-### Minimal next steps for your Go bot
-
-- Integration style selected:
-  - **WS (NapCat WebSocket Server) for receiving events**
-  - **HTTP API for sending messages**
-- For The Finals Cafe Channel, group id:
-  - `1026710563`
-
-### Run the bot (local Go)
-
-Environment variables:
-
-- `ONEBOT_REVERSE_WS_URL`
-- `ONEBOT_WS_TOKEN` (required for WS connect)
-- `TARGET_GROUP_ID`
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `OPENAI_MODEL`
-- `.env` file is auto-loaded on startup (already supported by code)
-
-Example:
-
-```bash
-# edit .env first, then run:
+cp .env.example .env       # 填三个 key
+cp go.toml.example go.toml
 go run .
 ```
 
-Quick start:
+`.env` 必填：`ONEBOT_WS_TOKEN`、`OPENAI_API_KEY`、`STEAM_API_KEY`。
 
-```bash
-cp .env.example .env
-# edit .env
-go run .
-```
+填好 `go.toml` ，参考 `go.toml.example`。
 
-Commands:
-
-- `ping` -> `pong`
-- `/help` or `help` or `帮助` -> command list
-- Other plain text -> intelligent reply (when `OPENAI_API_KEY` is set)
-
-### Important for Docker NapCat
-
-If NapCat runs in Docker and bot runs on host, map both ports:
-
-```bash
-docker run -d --name napcat \
-  -p 6099:6099 \
-  -p 3000:3000 \
-  -p 3001:3001 \
-  mlikiowa/napcat-docker:latest
-```
-
-Also ensure NapCat WebSocket server binds `0.0.0.0` (not `127.0.0.1`) inside container.
+`go.toml` 改动会**热加载**，加群删群无需重启。

@@ -1,0 +1,31 @@
+# cp go.toml.example go.toml
+#:schema ./schema/go.toml.schema.json
+
+[onebot]
+reverse_ws_url = "ws://127.0.0.1:3001"
+
+[openai]
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+model = "deepseek-v4-pro"
+
+# 示例
+[[groups]]
+qq = 123456789
+memory_file = "单文件存储记忆。可放置在 .run/memory/ 或 ~/.gobot/memory/ 等目录"
+prompt = '''
+支持 Go 模板语法，比如 {{ .SystemPrompt }}、{{ .MemoryPrompt }}。
+'''
+
+# The Finals Cafe Channel
+[[groups]]
+qq = 1026710563
+memory_file = ".run/memory/the_finals_cafe_channel.prompt"
+prompt = '''
+你是小喵，是 The Finals Cafe Channel QQ 群的群成员。
+The Finals Cafe Channel QQ 群由 The Finals 的玩家构成。
+
+{{ .SystemPrompt }}
+
+以下是你的记忆，你可以更新记忆，记住群文化、圈名、梗、成员关系等：
+{{ .MemoryPrompt }}
+'''
