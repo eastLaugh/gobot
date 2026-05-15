@@ -8,17 +8,11 @@ import (
 
 type botConfig struct {
 	OneBot oneBotConfig  `toml:"onebot"`
-	OpenAI openAIConfig  `toml:"openai"`
 	Groups []groupConfig `toml:"groups"`
 }
 
 type oneBotConfig struct {
 	ReverseWSURL string `toml:"reverse_ws_url"`
-}
-
-type openAIConfig struct {
-	BaseURL string `toml:"base_url"`
-	Model   string `toml:"model"`
 }
 
 type groupConfig struct {
@@ -41,12 +35,6 @@ func loadBotConfig(path string) (*botConfig, error) {
 	}
 	if cfg.OneBot.ReverseWSURL == "" {
 		return nil, fmt.Errorf("onebot.reverse_ws_url is required")
-	}
-	if cfg.OpenAI.BaseURL == "" {
-		return nil, fmt.Errorf("openai.base_url is required")
-	}
-	if cfg.OpenAI.Model == "" {
-		return nil, fmt.Errorf("openai.model is required")
 	}
 	if len(cfg.Groups) == 0 {
 		return nil, fmt.Errorf("groups is required")

@@ -4,11 +4,6 @@
 [onebot]
 reverse_ws_url = "ws://127.0.0.1:3001"
 
-[openai]
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-model = "deepseek-v4-pro"
-
-# 示例
 [[groups]]
 qq = 123456789
 memory_file = "单文件存储记忆。可放置在 .run/memory/ 或 ~/.gobot/memory/ 等目录"

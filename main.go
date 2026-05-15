@@ -135,9 +135,11 @@ func main() {
 	}
 	oneBotWSToken = os.Getenv("ONEBOT_WS_TOKEN")
 	openAIAPIKey := os.Getenv("OPENAI_API_KEY")
+	openAIBaseURL := os.Getenv("OPENAI_BASE_URL")
+	openAIModel := os.Getenv("OPENAI_MODEL")
 	steamAPIKey := os.Getenv("STEAM_API_KEY")
-	if oneBotWSToken == "" || openAIAPIKey == "" || steamAPIKey == "" {
-		panic("ONEBOT_WS_TOKEN / OPENAI_API_KEY / STEAM_API_KEY is required")
+	if oneBotWSToken == "" || openAIAPIKey == "" || openAIBaseURL == "" || openAIModel == "" || steamAPIKey == "" {
+		panic("ONEBOT_WS_TOKEN / OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL / STEAM_API_KEY is required")
 	}
 	cfg, err := loadBotConfig("go.toml")
 	if err != nil {
@@ -154,10 +156,10 @@ func main() {
 	}
 	defer unlock()
 
-	agent := newChatAgent(cfg.OpenAI.BaseURL, openAIAPIKey, cfg.OpenAI.Model)
+	agent := newChatAgent(openAIBaseURL, openAIAPIKey, openAIModel)
 	log.Printf("target groups=%v", groupIDs(groups))
 	log.Printf("reverse ws url=%s", cfg.OneBot.ReverseWSURL)
-	log.Printf("openai base_url=%s model=%s", cfg.OpenAI.BaseURL, cfg.OpenAI.Model)
+	log.Printf("openai base_url=%s model=%s", openAIBaseURL, openAIModel)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

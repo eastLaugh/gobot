@@ -35,12 +35,12 @@ AI 你好，请帮我部署此项目。我的群号是 ....... 我的群是 ....
 步骤：
 
 ```bash
-cp .env.example .env       # 填三个 key
+cp .env.example .env
 cp go.toml.example go.toml
 go run .
 ```
 
-`.env` 必填：`ONEBOT_WS_TOKEN`、`OPENAI_API_KEY`、`STEAM_API_KEY`。
+`.env` 必填：`ONEBOT_WS_TOKEN`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`OPENAI_MODEL`、`STEAM_API_KEY`。
 
 填好 `go.toml` ，参考 `go.toml.example`。
 
