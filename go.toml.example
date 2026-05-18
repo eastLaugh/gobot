@@ -1,5 +1,4 @@
 # cp go.toml.example go.toml
-#:schema ./schema/go.toml.schema.json
 
 [onebot]
 reverse_ws_url = "ws://127.0.0.1:3001"
@@ -9,6 +8,7 @@ qq = 123456789
 memory_file = "单文件存储记忆。可放置在 .run/memory/ 或 ~/.gobot/memory/ 等目录"
 prompt = '''
 支持 Go 模板语法，比如 {{ .SystemPrompt }}、{{ .MemoryPrompt }}。
+通用 system prompt 也支持 Go 模板语法，比如 {{ .BotQQ }}。
 '''
 
 # The Finals Cafe Channel
