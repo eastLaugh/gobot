@@ -26,7 +26,13 @@ var oneBotWSToken string
 
 const (
 	maintainerQQ = 2694212559
-	sponsorQQ    = 1596492444
+
+	// 群里管理指令：@ 机器人后 /ping、/hang、/bill（前后空白会 TrimSpace）
+	cmdPing  = "/ping"
+	cmdHang  = "/hang"
+	cmdBill  = "/bill"
+
+	sessionPauseSummaryEvent = "【系统事件】本 session 即将结束。请简要总结本轮对话要点；如有值得跨 session 保存的信息，可调用记忆工具更新记忆。除非非常必要，不要发送群消息。"
 )
 
 func Run(systemPrompt string, exampleConfig []byte) {
@@ -175,6 +181,7 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 		return err
 	}
 	log.Printf("登录 QQ=%d", botQQ)
+	atPrefix := "[CQ:at,qq=" + strconv.FormatInt(botQQ, 10) + "]"
 
 	var rpcMu sync.Mutex
 	rpcPending := map[string]chan []byte{}
@@ -222,10 +229,12 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 	}()
 
 	type observeResult struct {
-		groupID    int64
-		generation int64
-		added      []openai.ChatCompletionMessageParamUnion
-		err        error
+		groupID       int64
+		generation    int64
+		added         []openai.ChatCompletionMessageParamUnion
+		err           error
+		pauseSummary  bool
+		costYuan      float64
 	}
 	type timerEvent struct {
 		groupID int64
@@ -260,10 +269,17 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 		})
 	}
 
+	var (
+		pauseSession func(group *groupState)
+		startObserve func(group *groupState)
+	)
+
 	observeContext := func(group *groupState, timeout time.Duration) (context.Context, context.CancelFunc) {
 		callCtx, cancel := context.WithTimeout(ctx, timeout)
-		var observeSpent float64
-		callCtx = withObserveUsage(callCtx, &observeSpent)
+		var usageAcc observeUsageAcc
+		usageAcc.GroupID = group.ID
+		callCtx = withObserveUsage(callCtx, &usageAcc)
+		callCtx = bottools.WithGroupID(callCtx, group.ID)
 		callCtx = bottools.WithMemoryFile(callCtx, group.MemoryFile)
 		callCtx = bottools.WithSendGroupMessage(callCtx, func(message string) error {
 			writeMu.Lock()
@@ -292,21 +308,78 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 		callCtx = withTokenUsageReporter(callCtx, func(usage tokenUsage) {
 			usage = accumulateUsage(callCtx, usage)
 			logUsageRecord(usage)
-			if !usage.NotifyPrivate {
+			group.Runtime.Session.CostYuan += usage.CostYuan
+			if group.Runtime.PauseRunning || group.Runtime.PausePending {
 				return
 			}
-			message := formatTokenUsage(usage)
-			writeMu.Lock()
-			defer writeMu.Unlock()
-			for _, userID := range []int64{maintainerQQ, sponsorQQ} {
-				if err := sendPrivateMsgByWS(conn, userID, 0, message); err != nil {
-					log.Printf("发送 token 用量私聊失败：group_id=%d user_id=%d err=%v", usage.GroupID, userID, err)
-				} else {
-					log.Printf("发送 token 用量私聊：group_id=%d user_id=%d", usage.GroupID, userID)
-				}
+			if group.Runtime.Session.CostYuan >= sessionCostLimitYuan {
+				log.Printf("群 %d session 累计费用 %.4f 元达到上限 %.2f 元，结束 session 并总结", group.ID, group.Runtime.Session.CostYuan, sessionCostLimitYuan)
+				pauseSession(group)
 			}
 		})
 		return callCtx, cancel
+	}
+
+	finishPause := func(group *groupState, costYuan float64) {
+		stopTimer(group)
+		group.Runtime.PauseRunning = false
+		group.Runtime.Observing = false
+		group.Runtime.ObserveCancel = nil
+		group.Runtime.Dirty = false
+		pending := group.Runtime.Pending
+		group.Runtime.Session.ClearContext(group.MemoryFile)
+		log.Printf("群 %d session 已结束，本 session 累计 %.4f 元", group.ID, costYuan)
+		if pending > 0 || group.Runtime.Session.PendingUserText.Len() > 0 {
+			log.Printf("群 %d session 结束，%d 条待处理消息，立即开新 session", group.ID, pending)
+			startObserve(group)
+		}
+	}
+
+	runPauseSummary := func(group *groupState, memory string, messages []openai.ChatCompletionMessageParamUnion) {
+		costYuan := group.Runtime.Session.CostYuan
+		stopTimer(group)
+		group.Runtime.PauseRunning = true
+		group.Runtime.Observing = true
+		group.Runtime.Dirty = false
+		generation := group.Runtime.Generation
+		messages = appendObserveReminder(messages)
+		messages = append(messages, openai.UserMessage(sessionPauseSummaryEvent))
+		callCtx, cancel := observeContext(group, 90*time.Second)
+		group.Runtime.ObserveCancel = cancel
+		go func() {
+			defer cancel()
+			_, err := agent.Observe(callCtx, group.ID, botQQ, group.Prompt, memory, messages)
+			observeDone <- observeResult{groupID: group.ID, generation: generation, pauseSummary: true, costYuan: costYuan, err: err}
+		}()
+	}
+
+	execPause := func(group *groupState) {
+		writeMu.Lock()
+		err := sendGroupMsgByWS(conn, group.ID, "【有点累了喵，正在放慢脚步重新整理记忆，短期内可能会失明】")
+		writeMu.Unlock()
+		if err != nil {
+			log.Printf("发送 session 挂起群提示失败：group_id=%d err=%v", group.ID, err)
+		}
+		memory, messages := group.Runtime.Session.Snapshot()
+		if len(messages) == 0 {
+			finishPause(group, group.Runtime.Session.CostYuan)
+			return
+		}
+		runPauseSummary(group, memory, messages)
+	}
+
+	pauseSession = func(group *groupState) {
+		if group.Runtime.PauseRunning || group.Runtime.PausePending {
+			return
+		}
+		stopTimer(group)
+		if group.Runtime.Observing && group.Runtime.ObserveCancel != nil {
+			group.Runtime.PausePending = true
+			group.Runtime.ObserveCancel()
+			return
+		}
+		group.Runtime.Generation++
+		execPause(group)
 	}
 
 	finalObserve := func(group *groupState) {
@@ -336,16 +409,16 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 				group.Runtime.Observing = false
 			}
 			writeMu.Lock()
-			err := sendGroupMsgByWS(conn, group.ID, "【有点累了喵，正在放慢脚步重新整理记忆，短期内可能会失明】")
+			_ = sendGroupMsgByWS(conn, group.ID, "【有点累了喵，正在放慢脚步重新整理记忆，短期内可能会失明】")
 			writeMu.Unlock()
-			if err != nil {
-				log.Printf("发送退出提示失败：group_id=%d err=%v", group.ID, err)
-			}
 			finalObserve(group)
 		}
 	}
 
-	startObserve := func(group *groupState) {
+	startObserve = func(group *groupState) {
+		if group.Runtime.PauseRunning || group.Runtime.PausePending {
+			return
+		}
 		stopTimer(group)
 		memory, messages := group.Runtime.Session.Snapshot()
 		messages = appendObserveReminder(messages)
@@ -404,22 +477,43 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 				continue
 			}
 
-			text := extractText(ev)
+			text := strings.TrimSpace(extractText(ev))
 			if text == "" {
 				log.Printf("收到群消息但文本为空：group_id=%d user_id=%d", ev.GroupID, ev.UserID)
 				continue
 			}
 			log.Printf("收到群消息：group_id=%d user_id=%d text=%q", ev.GroupID, ev.UserID, text)
-			if text == "ping" {
-				writeMu.Lock()
-				err := sendGroupMsgByWS(conn, ev.GroupID, "pong")
-				writeMu.Unlock()
-				if err != nil {
-					log.Printf("发送 pong 失败：group_id=%d user_id=%d err=%v", ev.GroupID, ev.UserID, err)
-				} else {
-					log.Printf("已回复 pong：group_id=%d user_id=%d", ev.GroupID, ev.UserID)
+			if strings.HasPrefix(text, atPrefix) {
+				switch strings.TrimSpace(text[len(atPrefix):]) {
+				case cmdPing:
+					writeMu.Lock()
+					err := sendGroupMsgByWS(conn, ev.GroupID, "pong")
+					writeMu.Unlock()
+					if err != nil {
+						log.Printf("发送 pong 失败：group_id=%d user_id=%d err=%v", ev.GroupID, ev.UserID, err)
+					} else {
+						log.Printf("已回复 pong：group_id=%d user_id=%d", ev.GroupID, ev.UserID)
+					}
+					continue
+				case cmdHang:
+					log.Printf("群 %d 收到 /hang 指令：user_id=%d", ev.GroupID, ev.UserID)
+					pauseSession(group)
+					continue
+				case cmdBill:
+					msg, err := bottools.GroupBillText(ev.GroupID)
+					if err != nil {
+						msg = fmt.Sprintf("查询账单失败：%v", err)
+					}
+					writeMu.Lock()
+					err = sendGroupMsgByWS(conn, ev.GroupID, msg)
+					writeMu.Unlock()
+					if err != nil {
+						log.Printf("发送账单失败：group_id=%d user_id=%d err=%v", ev.GroupID, ev.UserID, err)
+					} else {
+						log.Printf("已回复账单：group_id=%d user_id=%d", ev.GroupID, ev.UserID)
+					}
+					continue
 				}
-				continue
 			}
 
 			t := eventTime(ev)
@@ -460,11 +554,21 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 			if group == nil || result.generation != group.Runtime.Generation {
 				continue
 			}
-			if len(result.added) > 0 {
+			if result.pauseSummary {
+				finishPause(group, result.costYuan)
+				continue
+			}
+			if len(result.added) > 0 && !group.Runtime.PausePending {
 				group.Runtime.Session.AppendMessages(result.added)
 			}
 			group.Runtime.Observing = false
 			group.Runtime.ObserveCancel = nil
+			if group.Runtime.PausePending {
+				group.Runtime.PausePending = false
+				group.Runtime.Generation++
+				execPause(group)
+				continue
+			}
 			if result.err != nil {
 				if errors.Is(result.err, context.Canceled) {
 					log.Printf("模型调用已取消")

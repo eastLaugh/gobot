@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"text/template"
 
 	"github.com/eastLaugh/web-app-go/go/pkg/tools"
@@ -37,10 +36,7 @@ type tokenUsage struct {
 	CachedTokens     int64
 	CompletionTokens int64
 	TotalTokens      int64
-	CostYuan         float64
-	ObserveTotal     float64
-	SinceStartTotal  float64
-	NotifyPrivate    bool
+	CostYuan float64
 }
 
 type tokenUsageReporterKey struct{}
@@ -71,6 +67,7 @@ func newChatAgent(openAIBaseURL, openAIAPIKey, openAIModel string, systemPrompt 
 		tools.Fetch_web_page, "抓取指定 URL 的网页正文。适合读取已知网页或搜索结果中的页面。",
 		bottools.SendGroupMessage, "向当前 QQ 群发送一条群友可见的消息。调用前要确认不是刷屏，并在参数里显式声明。一条群消息由一个气泡承载，大概 6 个气泡就占用一个屏幕。因此不宜连续调用超过 3次。",
 		bottools.SendGroupTempPrivate, "向当前群内某位群友发送群临时私聊（经本群发起，无需加好友）。仅用于单独输出信息；主人不会阅读。不要代替群聊回复。",
+		bottools.QueryGroupBilling, "查询 QQ 群 token 账单。默认查当前群累计费用；可设 AllGroups 查看所有群的累计花费。数据来自持久化的按群计费记录。",
 	)
 	tools.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	return &chatAgent{client: &client, model: openAIModel, systemPrompt: systemPrompt, registry: registry}
@@ -112,6 +109,9 @@ func (a *chatAgent) Observe(ctx context.Context, groupID int64, botQQ int64, pro
 	}
 	messages = append(messages, sessionMessages...)
 	var added []openai.ChatCompletionMessageParamUnion
+	if acc, ok := ctx.Value(observeUsageKey{}).(*observeUsageAcc); ok && acc != nil && acc.GroupID == 0 {
+		acc.GroupID = groupID
+	}
 
 	for round := 0; round < maxToolRounds; round++ {
 		writeRunRequest(groupID, a.model, round, messages, a.registry.ToParams())
@@ -148,7 +148,6 @@ func (a *chatAgent) Observe(ctx context.Context, groupID int64, botQQ int64, pro
 			return added, nil
 		}
 
-		sentGroupMessage := false
 		for _, tc := range msg.ToolCalls {
 			if tc.Type != "function" {
 				continue
@@ -158,9 +157,6 @@ func (a *chatAgent) Observe(ctx context.Context, groupID int64, botQQ int64, pro
 				out = err.Error()
 			}
 			log.Printf("工具调用：%s 参数=%s 结果=%s", tc.Function.Name, tc.Function.Arguments, truncateForLog(out, 200))
-			if strings.HasSuffix(tc.Function.Name, "SendGroupMessage") && out == "已发送。" {
-				sentGroupMessage = true
-			}
 			toolMessage := openai.ToolMessage(out, tc.ID)
 			messages = append(messages, toolMessage)
 			added = append(added, toolMessage)
@@ -173,7 +169,6 @@ func (a *chatAgent) Observe(ctx context.Context, groupID int64, botQQ int64, pro
 			CachedTokens:     resp.Usage.PromptTokensDetails.CachedTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
-			NotifyPrivate:    sentGroupMessage,
 		})
 	}
 	return added, fmt.Errorf("超过 %d 轮工具调用上限", maxToolRounds)

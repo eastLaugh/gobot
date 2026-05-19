@@ -7,11 +7,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 )
 
-const usageDir = ".run/usage"
+const (
+	usageDir              = ".run/usage"
+	sessionCostLimitYuan  = 3.0
+)
 
 type usageRecord struct {
 	Time             string  `json:"time"`
@@ -23,8 +25,7 @@ type usageRecord struct {
 	UncachedTokens   int64   `json:"uncached_tokens"`
 	CompletionTokens int64   `json:"completion_tokens"`
 	TotalTokens      int64   `json:"total_tokens"`
-	CostYuan         float64 `json:"cost_yuan"`
-	SentGroupMessage bool    `json:"sent_group_message"`
+	CostYuan float64 `json:"cost_yuan"`
 }
 
 func uncachedPromptTokens(prompt, cached int64) int64 {
@@ -54,8 +55,7 @@ func appendUsageRecord(usage tokenUsage) error {
 		UncachedTokens:   uncachedPromptTokens(usage.PromptTokens, usage.CachedTokens),
 		CompletionTokens: usage.CompletionTokens,
 		TotalTokens:      usage.TotalTokens,
-		CostYuan:         usage.CostYuan,
-		SentGroupMessage: usage.NotifyPrivate,
+		CostYuan: usage.CostYuan,
 	}
 	b, err := json.Marshal(rec)
 	if err != nil {
@@ -73,37 +73,32 @@ func appendUsageRecord(usage tokenUsage) error {
 	return nil
 }
 
-var (
-	usageMu         sync.Mutex
-	usageSinceStart float64
-)
+type observeUsageAcc struct {
+	GroupID          int64
+	CostYuan         float64
+	PromptTokens     int64
+	CachedTokens     int64
+	CompletionTokens int64
+	TotalTokens int64
+}
 
 type observeUsageKey struct{}
 
-func withObserveUsage(ctx context.Context, spent *float64) context.Context {
-	return context.WithValue(ctx, observeUsageKey{}, spent)
+func withObserveUsage(ctx context.Context, acc *observeUsageAcc) context.Context {
+	return context.WithValue(ctx, observeUsageKey{}, acc)
 }
 
 func accumulateUsage(ctx context.Context, usage tokenUsage) tokenUsage {
 	cost := usageCostYuan(usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 	usage.CostYuan = cost
-	if p, ok := ctx.Value(observeUsageKey{}).(*float64); ok && p != nil {
-		*p += cost
-		usage.ObserveTotal = *p
-	} else {
-		usage.ObserveTotal = cost
+	if acc, ok := ctx.Value(observeUsageKey{}).(*observeUsageAcc); ok && acc != nil {
+		acc.CostYuan += cost
+		acc.PromptTokens += usage.PromptTokens
+		acc.CachedTokens += usage.CachedTokens
+		acc.CompletionTokens += usage.CompletionTokens
+		acc.TotalTokens += usage.TotalTokens
 	}
-	usageMu.Lock()
-	usageSinceStart += cost
-	usage.SinceStartTotal = usageSinceStart
-	usageMu.Unlock()
 	return usage
-}
-
-func formatTokenUsage(usage tokenUsage) string {
-	uncached := uncachedPromptTokens(usage.PromptTokens, usage.CachedTokens)
-	return fmt.Sprintf("本次发言 token 用量（群 %d）：\n输入 %d tokens\n输入（已缓存）%d tokens\n输出 %d tokens\n总计 %d tokens\n本次费用约 %.6f 元\n本 observe 累计约 %.4f 元\n自启动累计约 %.4f 元",
-		usage.GroupID, uncached, usage.CachedTokens, usage.CompletionTokens, usage.TotalTokens, usage.CostYuan, usage.ObserveTotal, usage.SinceStartTotal)
 }
 
 func logUsageRecord(usage tokenUsage) {

@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const groupTempPrivateDisclaimer = "\n\n我看不到你的私信，本条消息仅用于输出。"
+const groupTempPrivateDisclaimer = "\n\n「请勿回复，我看不到」"
 
 type sendGroupTempPrivateKey struct{}
 

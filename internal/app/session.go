@@ -34,18 +34,21 @@ type chatSession struct {
 	Memory          string
 	Messages        []openai.ChatCompletionMessageParamUnion
 	PendingUserText strings.Builder
+	CostYuan        float64
 }
 
 type groupRuntime struct {
-	Session       chatSession
-	Timer         *time.Timer
-	TimerSeq      int64
-	Observing     bool
-	Dirty         bool
-	Pending       int
-	PendingLastAt time.Time
-	ObserveCancel context.CancelFunc
-	Generation    int64
+	Session            chatSession
+	Timer              *time.Timer
+	TimerSeq           int64
+	Observing          bool
+	Dirty              bool
+	Pending            int
+	PendingLastAt      time.Time
+	ObserveCancel      context.CancelFunc
+	Generation         int64
+	PausePending bool
+	PauseRunning bool
 }
 
 func eventTime(ev OneBotEvent) time.Time {
@@ -65,6 +68,14 @@ func (s *chatSession) Reset(memoryFile string) {
 	s.Messages = nil
 	s.PendingUserText.Reset()
 	s.LastAt = time.Time{}
+	s.CostYuan = 0
+}
+
+// ClearContext 结束 session 长上下文，保留尚未 observe 的 pending 消息。
+func (s *chatSession) ClearContext(memoryFile string) {
+	s.Memory = bottools.MemoryPromptSection(memoryFile)
+	s.Messages = nil
+	s.CostYuan = 0
 }
 
 func (s *chatSession) HasContent() bool {
