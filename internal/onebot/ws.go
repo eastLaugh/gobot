@@ -1,4 +1,4 @@
-package app
+package onebot
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-func getLoginQQByWS(conn *websocket.Conn) (int64, error) {
+func LoginQQ(conn *websocket.Conn) (int64, error) {
 	echo := fmt.Sprintf("login-%d", time.Now().UnixNano())
 	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return 0, err
@@ -57,7 +57,7 @@ func getLoginQQByWS(conn *websocket.Conn) (int64, error) {
 	}
 }
 
-func sendGroupMsgByWS(conn *websocket.Conn, groupID int64, message string) error {
+func SendGroupMsg(conn *websocket.Conn, groupID int64, message string) error {
 	payload := map[string]any{
 		"action": "send_group_msg",
 		"params": map[string]any{"group_id": groupID, "message": message},
@@ -72,8 +72,8 @@ func sendGroupMsgByWS(conn *websocket.Conn, groupID int64, message string) error
 	return conn.SetWriteDeadline(time.Time{})
 }
 
-// sendPrivateMsgByWS 发送私聊。groupID>0 时走群临时会话（同群未加好友）；groupID=0 时走普通私聊（好友）。
-func sendPrivateMsgByWS(conn *websocket.Conn, userID, groupID int64, message string) error {
+// SendPrivateMsg 发送私聊。groupID>0 时走群临时会话；groupID=0 时走普通私聊。
+func SendPrivateMsg(conn *websocket.Conn, userID, groupID int64, message string) error {
 	params := map[string]any{"user_id": userID, "message": message}
 	if groupID > 0 {
 		params["group_id"] = groupID
@@ -92,7 +92,7 @@ func sendPrivateMsgByWS(conn *websocket.Conn, userID, groupID int64, message str
 	return conn.SetWriteDeadline(time.Time{})
 }
 
-func pokeGroupMemberByWS(conn *websocket.Conn, groupID int64, userID int64) error {
+func PokeGroupMember(conn *websocket.Conn, groupID, userID int64) error {
 	payload := map[string]any{
 		"action": "group_poke",
 		"params": map[string]any{"group_id": groupID, "user_id": userID},
@@ -107,7 +107,7 @@ func pokeGroupMemberByWS(conn *websocket.Conn, groupID int64, userID int64) erro
 	return conn.SetWriteDeadline(time.Time{})
 }
 
-type oneBotMember struct {
+type member struct {
 	UserID   int64  `json:"user_id"`
 	Nickname string `json:"nickname"`
 	Card     string `json:"card"`
@@ -115,16 +115,16 @@ type oneBotMember struct {
 	Title    string `json:"title"`
 }
 
-func queryGroupMembersByWS(ctx context.Context, callOneBot func(context.Context, string, map[string]any) ([]byte, error), groupID int64, query string, limit int) (string, error) {
-	b, err := callOneBot(ctx, "get_group_member_list", map[string]any{"group_id": groupID})
+func QueryGroupMembers(ctx context.Context, call func(context.Context, string, map[string]any) ([]byte, error), groupID int64, query string, limit int) (string, error) {
+	b, err := call(ctx, "get_group_member_list", map[string]any{"group_id": groupID})
 	if err != nil {
 		return "", err
 	}
 	var resp struct {
-		Status  string         `json:"status"`
-		Retcode int            `json:"retcode"`
-		Message string         `json:"message"`
-		Data    []oneBotMember `json:"data"`
+		Status  string   `json:"status"`
+		Retcode int      `json:"retcode"`
+		Message string   `json:"message"`
+		Data    []member `json:"data"`
 	}
 	if err := json.Unmarshal(b, &resp); err != nil {
 		return "", err
@@ -136,15 +136,15 @@ func queryGroupMembersByWS(ctx context.Context, callOneBot func(context.Context,
 		limit = 50
 	}
 	query = strings.ToLower(query)
-	var members []oneBotMember
+	var members []member
 	for _, m := range resp.Data {
 		if query != "" && !strings.Contains(strings.ToLower(fmt.Sprint(m.UserID)), query) && !strings.Contains(strings.ToLower(m.Nickname), query) && !strings.Contains(strings.ToLower(m.Card), query) {
 			continue
 		}
 		members = append(members, m)
 	}
-	slices.SortFunc(members, func(a, b oneBotMember) int {
-		return strings.Compare(displayMemberName(a), displayMemberName(b))
+	slices.SortFunc(members, func(a, b member) int {
+		return strings.Compare(displayName(a), displayName(b))
 	})
 	if len(members) == 0 {
 		return "没有匹配的群成员。", nil
@@ -160,7 +160,7 @@ func queryGroupMembersByWS(ctx context.Context, callOneBot func(context.Context,
 		if i >= limit {
 			break
 		}
-		fmt.Fprintf(&out, "- %d | %s", m.UserID, displayMemberName(m))
+		fmt.Fprintf(&out, "- %d | %s", m.UserID, displayName(m))
 		if m.Role != "" {
 			fmt.Fprintf(&out, " | %s", m.Role)
 		}
@@ -172,7 +172,7 @@ func queryGroupMembersByWS(ctx context.Context, callOneBot func(context.Context,
 	return strings.TrimRight(out.String(), "\n"), nil
 }
 
-func displayMemberName(m oneBotMember) string {
+func displayName(m member) string {
 	if m.Card != "" {
 		return m.Card
 	}
@@ -180,32 +180,4 @@ func displayMemberName(m oneBotMember) string {
 		return m.Nickname
 	}
 	return fmt.Sprint(m.UserID)
-}
-
-func extractText(ev OneBotEvent) string {
-	if ev.RawMessage != "" {
-		return ev.RawMessage
-	}
-	var s string
-	if err := json.Unmarshal(ev.Message, &s); err == nil {
-		return s
-	}
-	type seg struct {
-		Type string            `json:"type"`
-		Data map[string]string `json:"data"`
-	}
-	var segs []seg
-	if err := json.Unmarshal(ev.Message, &segs); err == nil {
-		var b strings.Builder
-		for _, sg := range segs {
-			if sg.Type == "text" {
-				b.WriteString(sg.Data["text"])
-			}
-			if sg.Type == "at" {
-				fmt.Fprintf(&b, "[CQ:at,qq=%s]", sg.Data["qq"])
-			}
-		}
-		return b.String()
-	}
-	return ""
 }

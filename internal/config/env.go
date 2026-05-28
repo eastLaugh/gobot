@@ -1,4 +1,4 @@
-package app
+package config
 
 import (
 	"cmp"
@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-func loadDotEnv(path string) error {
+func LoadDotEnv(path string) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -30,13 +30,13 @@ func loadDotEnv(path string) error {
 	return nil
 }
 
-func ensureConfig(path string, exampleConfig []byte) error {
+func Ensure(path string, example []byte) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.WriteFile(path, exampleConfig, 0600); err != nil {
+	if err := os.WriteFile(path, example, 0600); err != nil {
 		return err
 	}
 	log.Printf("%s 不存在，已从内置模板创建。请编辑后保存关闭。", path)

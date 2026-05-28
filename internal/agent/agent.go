@@ -1,4 +1,4 @@
-package app
+package agent
 
 import (
 	"bytes"
@@ -21,38 +21,14 @@ import (
 
 const maxToolRounds = 10
 
-type chatAgent struct {
+type Agent struct {
 	client       *openai.Client
 	model        string
 	systemPrompt string
 	registry     *tools.Registry
 }
 
-type tokenUsage struct {
-	GroupID          int64
-	Round            int
-	Model            string
-	PromptTokens     int64
-	CachedTokens     int64
-	CompletionTokens int64
-	TotalTokens      int64
-	CostYuan float64
-}
-
-type tokenUsageReporterKey struct{}
-
-func withTokenUsageReporter(ctx context.Context, report func(tokenUsage)) context.Context {
-	return context.WithValue(ctx, tokenUsageReporterKey{}, report)
-}
-
-func reportTokenUsage(ctx context.Context, usage tokenUsage) {
-	report, ok := ctx.Value(tokenUsageReporterKey{}).(func(tokenUsage))
-	if ok {
-		report(usage)
-	}
-}
-
-func newChatAgent(openAIBaseURL, openAIAPIKey, openAIModel string, systemPrompt string) *chatAgent {
+func New(openAIBaseURL, openAIAPIKey, openAIModel, systemPrompt string) *Agent {
 	client := openai.NewClient(
 		option.WithBaseURL(openAIBaseURL),
 		option.WithAPIKey(openAIAPIKey),
@@ -67,7 +43,8 @@ func newChatAgent(openAIBaseURL, openAIAPIKey, openAIModel string, systemPrompt 
 		tools.Fetch_web_page, "抓取指定 URL 的网页正文。适合读取已知网页或搜索结果中的页面。",
 		bottools.SendGroupMessage, "向当前 QQ 群发送一条群友可见的消息。调用前要确认不是刷屏，并在参数里显式声明。一条群消息由一个气泡承载，大概 6 个气泡就占用一个屏幕。因此不宜连续调用超过 3次。",
 		bottools.SendGroupTempPrivate, "向当前群内某位群友发送群临时私聊（经本群发起，无需加好友）。仅用于单独输出信息；主人不会阅读。不要代替群聊回复。",
-		bottools.QueryGroupBilling, "查询 QQ 群 token 账单。默认查当前群累计费用；可设 AllGroups 查看所有群的累计花费。数据来自持久化的按群计费记录。",
+		// 账单仅维护者 @bot /bill，走 bottools.QueryGroupBilling，不注册给模型。
+		// bottools.QueryGroupBilling, "查询 QQ 群 token 账单。默认查当前群累计费用；可设 AllGroups 查看所有群的累计花费。数据来自持久化的按群计费记录。",
 		bottools.RecallUndercover, "玩谁是卧底前请先回忆。返回裁判纪律（纯文本，不发群）。",
 		bottools.RecallWerewolf, "玩狼人杀前请先回忆。返回上帝纪律（纯文本，不发群）。",
 		bottools.SendLaughBroken, "向当前群发送「笑烂了」梗图（内置图片，一条群消息）。",
@@ -75,7 +52,7 @@ func newChatAgent(openAIBaseURL, openAIAPIKey, openAIModel string, systemPrompt 
 		bottools.SendBuYao, "向当前群发送「不要」卖萌梗图（内置图片，一条群消息）。",
 	)
 	tools.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-	return &chatAgent{client: &client, model: openAIModel, systemPrompt: systemPrompt, registry: registry}
+	return &Agent{client: &client, model: openAIModel, systemPrompt: systemPrompt, registry: registry}
 }
 
 type promptData struct {
@@ -104,7 +81,7 @@ func buildSystemPrompt(promptTemplate, systemPrompt string, botQQ int64, memory 
 	return renderPrompt("group", promptTemplate, data)
 }
 
-func (a *chatAgent) Observe(ctx context.Context, groupID int64, botQQ int64, prompt, memory string, sessionMessages []openai.ChatCompletionMessageParamUnion) ([]openai.ChatCompletionMessageParamUnion, error) {
+func (a *Agent) Observe(ctx context.Context, groupID, botQQ int64, prompt, memory string, sessionMessages []openai.ChatCompletionMessageParamUnion) ([]openai.ChatCompletionMessageParamUnion, error) {
 	system, err := buildSystemPrompt(prompt, a.systemPrompt, botQQ, memory)
 	if err != nil {
 		return nil, err
@@ -114,7 +91,7 @@ func (a *chatAgent) Observe(ctx context.Context, groupID int64, botQQ int64, pro
 	}
 	messages = append(messages, sessionMessages...)
 	var added []openai.ChatCompletionMessageParamUnion
-	if acc, ok := ctx.Value(observeUsageKey{}).(*observeUsageAcc); ok && acc != nil && acc.GroupID == 0 {
+	if acc, ok := ctx.Value(observeUsageKey{}).(*ObserveUsageAcc); ok && acc != nil && acc.GroupID == 0 {
 		acc.GroupID = groupID
 	}
 
@@ -141,7 +118,7 @@ func (a *chatAgent) Observe(ctx context.Context, groupID int64, botQQ int64, pro
 			} else {
 				log.Printf("模型未调用工具，也没有普通输出")
 			}
-			reportTokenUsage(ctx, tokenUsage{
+			reportTokenUsage(ctx, TokenUsage{
 				GroupID:          groupID,
 				Round:            round,
 				Model:            a.model,
@@ -161,12 +138,12 @@ func (a *chatAgent) Observe(ctx context.Context, groupID int64, botQQ int64, pro
 			if err != nil {
 				out = err.Error()
 			}
-			log.Printf("工具调用：%s 参数=%s 结果=%s", tc.Function.Name, tc.Function.Arguments, truncateForLog(out, 200))
+			log.Printf("工具调用：%s 参数=%s 结果=%s", tc.Function.Name, tc.Function.Arguments, TruncateForLog(out, 200))
 			toolMessage := openai.ToolMessage(out, tc.ID)
 			messages = append(messages, toolMessage)
 			added = append(added, toolMessage)
 		}
-		reportTokenUsage(ctx, tokenUsage{
+		reportTokenUsage(ctx, TokenUsage{
 			GroupID:          groupID,
 			Round:            round,
 			Model:            a.model,
@@ -179,7 +156,7 @@ func (a *chatAgent) Observe(ctx context.Context, groupID int64, botQQ int64, pro
 	return added, fmt.Errorf("超过 %d 轮工具调用上限", maxToolRounds)
 }
 
-func truncateForLog(s string, n int) string {
+func TruncateForLog(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}

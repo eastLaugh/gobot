@@ -3,6 +3,9 @@
 [onebot]
 reverse_ws_url = "ws://127.0.0.1:3001"
 
+# /bill 仅维护者可触发；群配置变更时会戳列表中的 QQ
+maintainers = [2694212559]
+
 [[groups]]
 qq = 123456789
 memory_file = "单文件存储记忆。可放置在 .run/memory/ 或 ~/.gobot/memory/ 等目录"

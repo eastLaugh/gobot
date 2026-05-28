@@ -1,4 +1,4 @@
-package app
+package config
 
 import (
 	"fmt"
@@ -6,35 +6,32 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-type botConfig struct {
-	OneBot oneBotConfig  `toml:"onebot"`
-	Groups []groupConfig `toml:"groups"`
+type Config struct {
+	OneBot      OneBot  `toml:"onebot"`
+	Maintainers []int64 `toml:"maintainers"`
+	Groups      []Group `toml:"groups"`
 }
 
-type oneBotConfig struct {
+type OneBot struct {
 	ReverseWSURL string `toml:"reverse_ws_url"`
 }
 
-type groupConfig struct {
+type Group struct {
 	QQ         int64  `toml:"qq"`
 	Prompt     string `toml:"prompt"`
 	MemoryFile string `toml:"memory_file"`
 }
 
-type groupState struct {
-	ID         int64
-	Prompt     string
-	MemoryFile string
-	Runtime    groupRuntime
-}
-
-func loadBotConfig(path string) (*botConfig, error) {
-	var cfg botConfig
+func Load(path string) (*Config, error) {
+	var cfg Config
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return nil, err
 	}
 	if cfg.OneBot.ReverseWSURL == "" {
 		return nil, fmt.Errorf("onebot.reverse_ws_url is required")
+	}
+	if len(cfg.Maintainers) == 0 {
+		return nil, fmt.Errorf("maintainers is required")
 	}
 	if len(cfg.Groups) == 0 {
 		return nil, fmt.Errorf("groups is required")
@@ -53,14 +50,11 @@ func loadBotConfig(path string) (*botConfig, error) {
 	return &cfg, nil
 }
 
-func loadGroupStates(cfg *botConfig) (map[int64]*groupState, error) {
-	groups := make(map[int64]*groupState, len(cfg.Groups))
-	for _, group := range cfg.Groups {
-		groups[group.QQ] = &groupState{
-			ID:         group.QQ,
-			Prompt:     group.Prompt,
-			MemoryFile: group.MemoryFile,
+func (c *Config) IsMaintainer(qq int64) bool {
+	for _, m := range c.Maintainers {
+		if m == qq {
+			return true
 		}
 	}
-	return groups, nil
+	return false
 }

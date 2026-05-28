@@ -1,4 +1,4 @@
-package app
+package bot
 
 import (
 	"context"
@@ -8,150 +8,30 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/eastlaugh/gobot/internal/agent"
 	"github.com/eastlaugh/gobot/internal/bottools"
-	"github.com/fsnotify/fsnotify"
+	"github.com/eastlaugh/gobot/internal/config"
+	"github.com/eastlaugh/gobot/internal/incoming"
+	"github.com/eastlaugh/gobot/internal/onebot"
+	"github.com/eastlaugh/gobot/internal/session"
 	"github.com/gorilla/websocket"
 	"github.com/openai/openai-go/v3"
 )
 
-var oneBotWSToken string
+func (b *Bot) consumeOnce(ctx context.Context, sig <-chan os.Signal) error {
+	cfg := b.cfg
+	groups := b.groups
+	ag := b.agent
+	configPath := b.configPath
 
-const (
-	maintainerQQ = 2694212559
-
-	// 群里管理指令：@ 机器人后 /ping、/hang、/bill（前后空白会 TrimSpace）
-	cmdPing  = "/ping"
-	cmdHang  = "/hang"
-	cmdBill  = "/bill"
-
-	sessionPauseSummaryEvent = "【系统事件】本 session 即将结束。请简要总结本轮对话要点；如有值得跨 session 保存的信息，可调用记忆工具更新记忆。除非非常必要，不要发送群消息。"
-)
-
-func Run(systemPrompt string, exampleConfig []byte) {
-	if err := loadDotEnv(".env"); err != nil {
-		log.Fatalf("load .env: %v", err)
-	}
-	oneBotWSToken = os.Getenv("ONEBOT_WS_TOKEN")
-	openAIAPIKey := os.Getenv("OPENAI_API_KEY")
-	openAIBaseURL := os.Getenv("OPENAI_BASE_URL")
-	openAIModel := os.Getenv("OPENAI_MODEL")
-	steamAPIKey := os.Getenv("STEAM_API_KEY")
-	if oneBotWSToken == "" || openAIAPIKey == "" || openAIBaseURL == "" || openAIModel == "" || steamAPIKey == "" {
-		panic("ONEBOT_WS_TOKEN / OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL / STEAM_API_KEY is required")
-	}
-	if err := ensureConfig("go.toml", exampleConfig); err != nil {
-		log.Fatalf("ensure go.toml: %v", err)
-	}
-	cfg, err := loadBotConfig("go.toml")
-	if err != nil {
-		log.Fatalf("load go.toml: %v", err)
-	}
-	groups, err := loadGroupStates(cfg)
-	if err != nil {
-		log.Fatalf("load groups: %v", err)
-	}
-
-	unlock, err := acquireInstanceLock()
-	if err != nil {
-		log.Fatalf("lock: %v", err)
-	}
-	defer unlock()
-
-	agent := newChatAgent(openAIBaseURL, openAIAPIKey, openAIModel, systemPrompt)
-	log.Printf("target groups=%v", groupIDs(groups))
-	log.Printf("reverse ws url=%s", cfg.OneBot.ReverseWSURL)
-	log.Printf("openai base_url=%s model=%s", openAIBaseURL, openAIModel)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(sig)
-
-	if err := runReverseWSLoop(ctx, sig, "go.toml", cfg, groups, agent); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatalf("run error: %v", err)
-	}
-}
-
-const instanceLockPath = "/tmp/gobot.lock"
-
-func acquireInstanceLock() (func(), error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(instanceLockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-		if err == nil {
-			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
-			_ = f.Close()
-			return func() { _ = os.Remove(instanceLockPath) }, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, err
-		}
-		b, _ := os.ReadFile(instanceLockPath)
-		pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-		if pid > 0 && syscall.Kill(pid, 0) == nil {
-			return nil, fmt.Errorf("已在运行 (pid %d)，请先停掉再启动", pid)
-		}
-		_ = os.Remove(instanceLockPath)
-	}
-	return nil, errors.New("无法获取单实例锁")
-}
-
-func groupIDs(groups map[int64]*groupState) []int64 {
-	ids := make([]int64, 0, len(groups))
-	for id := range groups {
-		ids = append(ids, id)
-	}
-	return ids
-}
-
-func runReverseWSLoop(ctx context.Context, sig <-chan os.Signal, configPath string, cfg *botConfig, groups map[int64]*groupState, agent *chatAgent) error {
-	backoff := time.Second
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-sig:
-			return context.Canceled
-		default:
-		}
-
-		err := consumeOnce(ctx, sig, configPath, cfg, groups, agent)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err == nil || errors.Is(err, context.Canceled) {
-			return err
-		}
-
-		log.Printf("ws disconnected: %v; reconnect in %s", err, backoff)
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-sig:
-			return context.Canceled
-		case <-time.After(backoff):
-		}
-		if backoff < 15*time.Second {
-			backoff *= 2
-			if backoff > 15*time.Second {
-				backoff = 15 * time.Second
-			}
-		}
-	}
-}
-
-func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, cfg *botConfig, groups map[int64]*groupState, agent *chatAgent) error {
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 	header := http.Header{}
-	header.Set("Authorization", "Bearer "+oneBotWSToken)
+	header.Set("Authorization", "Bearer "+b.wsToken)
 	conn, resp, err := dialer.DialContext(ctx, cfg.OneBot.ReverseWSURL, header)
 	if err != nil {
 		if resp != nil {
@@ -176,7 +56,7 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 	log.Printf("connected reverse ws: %s", cfg.OneBot.ReverseWSURL)
 
 	var writeMu sync.Mutex
-	botQQ, err := getLoginQQByWS(conn)
+	botQQ, err := onebot.LoginQQ(conn)
 	if err != nil {
 		return err
 	}
@@ -249,18 +129,18 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 	}
 	defer watcher.Close()
 
-	stopTimer := func(group *groupState) {
+	stopTimer := func(group *session.Group) {
 		if group.Runtime.Timer != nil {
 			group.Runtime.Timer.Stop()
 			group.Runtime.Timer = nil
 		}
 	}
 
-	resetTimer := func(group *groupState) {
+	resetTimer := func(group *session.Group) {
 		stopTimer(group)
 		group.Runtime.TimerSeq++
 		seq := group.Runtime.TimerSeq
-		delay := coldDelay(group.Runtime.Pending, group.Runtime.PendingAtBot) - time.Since(group.Runtime.PendingLastAt)
+		delay := session.ColdDelay(group.Runtime.Pending, group.Runtime.PendingAtBot) - time.Since(group.Runtime.PendingLastAt)
 		if delay < 0 {
 			delay = 0
 		}
@@ -270,57 +150,57 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 	}
 
 	var (
-		pauseSession func(group *groupState)
-		startObserve func(group *groupState)
+		pauseSession func(group *session.Group)
+		startObserve func(group *session.Group)
 	)
 
-	observeContext := func(group *groupState, timeout time.Duration) (context.Context, context.CancelFunc) {
+	observeContext := func(group *session.Group, timeout time.Duration) (context.Context, context.CancelFunc) {
 		callCtx, cancel := context.WithTimeout(ctx, timeout)
-		var usageAcc observeUsageAcc
+		var usageAcc agent.ObserveUsageAcc
 		usageAcc.GroupID = group.ID
-		callCtx = withObserveUsage(callCtx, &usageAcc)
+		callCtx = agent.WithObserveUsage(callCtx, &usageAcc)
 		callCtx = bottools.WithGroupID(callCtx, group.ID)
 		callCtx = bottools.WithMemoryFile(callCtx, group.MemoryFile)
 		callCtx = bottools.WithSendGroupMessage(callCtx, func(message string) error {
 			writeMu.Lock()
 			defer writeMu.Unlock()
-			return sendGroupMsgByWS(conn, group.ID, message)
+			return onebot.SendGroupMsg(conn, group.ID, message)
 		})
 		callCtx = bottools.WithSendGroupTempPrivate(callCtx, func(userID int64, message string) error {
 			writeMu.Lock()
 			defer writeMu.Unlock()
-			err := sendPrivateMsgByWS(conn, userID, group.ID, message)
+			err := onebot.SendPrivateMsg(conn, userID, group.ID, message)
 			if err != nil {
 				log.Printf("模型发送群临时私聊失败：group_id=%d user_id=%d err=%v", group.ID, userID, err)
 				return err
 			}
-			log.Printf("模型发送群临时私聊：group_id=%d user_id=%d text=%q", group.ID, userID, truncateForLog(message, 200))
+			log.Printf("模型发送群临时私聊：group_id=%d user_id=%d text=%q", group.ID, userID, agent.TruncateForLog(message, 200))
 			return nil
 		})
 		callCtx = bottools.WithGroupMembers(callCtx, func(ctx context.Context, query string, limit int) (string, error) {
-			return queryGroupMembersByWS(ctx, callOneBot, group.ID, query, limit)
+			return onebot.QueryGroupMembers(ctx, callOneBot, group.ID, query, limit)
 		})
 		callCtx = bottools.WithGroupPoke(callCtx, func(userID int64) error {
 			writeMu.Lock()
 			defer writeMu.Unlock()
-			return pokeGroupMemberByWS(conn, group.ID, userID)
+			return onebot.PokeGroupMember(conn, group.ID, userID)
 		})
-		callCtx = withTokenUsageReporter(callCtx, func(usage tokenUsage) {
-			usage = accumulateUsage(callCtx, usage)
-			logUsageRecord(usage)
+		callCtx = agent.WithTokenUsageReporter(callCtx, func(usage agent.TokenUsage) {
+			usage = agent.AccumulateUsage(callCtx, usage)
+			agent.LogUsageRecord(usage)
 			group.Runtime.Session.CostYuan += usage.CostYuan
 			if group.Runtime.PauseRunning || group.Runtime.PausePending {
 				return
 			}
-			if group.Runtime.Session.CostYuan >= sessionCostLimitYuan {
-				log.Printf("群 %d session 累计费用 %.4f 元达到上限 %.2f 元，结束 session 并总结", group.ID, group.Runtime.Session.CostYuan, sessionCostLimitYuan)
+			if group.Runtime.Session.CostYuan >= session.CostLimitYuan {
+				log.Printf("群 %d session 累计费用 %.4f 元达到上限 %.2f 元，结束 session 并总结", group.ID, group.Runtime.Session.CostYuan, session.CostLimitYuan)
 				pauseSession(group)
 			}
 		})
 		return callCtx, cancel
 	}
 
-	finishPause := func(group *groupState, costYuan float64) {
+	finishPause := func(group *session.Group, costYuan float64) {
 		stopTimer(group)
 		group.Runtime.PauseRunning = false
 		group.Runtime.Observing = false
@@ -335,27 +215,27 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 		}
 	}
 
-	runPauseSummary := func(group *groupState, memory string, messages []openai.ChatCompletionMessageParamUnion) {
+	runPauseSummary := func(group *session.Group, memory string, messages []openai.ChatCompletionMessageParamUnion) {
 		costYuan := group.Runtime.Session.CostYuan
 		stopTimer(group)
 		group.Runtime.PauseRunning = true
 		group.Runtime.Observing = true
 		group.Runtime.Dirty = false
 		generation := group.Runtime.Generation
-		messages = appendObserveReminder(messages)
+		messages = session.AppendObserveReminder(messages)
 		messages = append(messages, openai.UserMessage(sessionPauseSummaryEvent))
 		callCtx, cancel := observeContext(group, 90*time.Second)
 		group.Runtime.ObserveCancel = cancel
 		go func() {
 			defer cancel()
-			_, err := agent.Observe(callCtx, group.ID, botQQ, group.Prompt, memory, messages)
+			_, err := ag.Observe(callCtx, group.ID, botQQ, group.Prompt, memory, messages)
 			observeDone <- observeResult{groupID: group.ID, generation: generation, pauseSummary: true, costYuan: costYuan, err: err}
 		}()
 	}
 
-	execPause := func(group *groupState) {
+	execPause := func(group *session.Group) {
 		writeMu.Lock()
-		err := sendGroupMsgByWS(conn, group.ID, "【有点累了喵，正在放慢脚步重新整理记忆，短期内可能会失明】")
+		err := onebot.SendGroupMsg(conn, group.ID, "【有点累了喵，正在放慢脚步重新整理记忆，短期内可能会失明】")
 		writeMu.Unlock()
 		if err != nil {
 			log.Printf("发送 session 挂起群提示失败：group_id=%d err=%v", group.ID, err)
@@ -368,7 +248,7 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 		runPauseSummary(group, memory, messages)
 	}
 
-	pauseSession = func(group *groupState) {
+	pauseSession = func(group *session.Group) {
 		if group.Runtime.PauseRunning || group.Runtime.PausePending {
 			return
 		}
@@ -382,17 +262,17 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 		execPause(group)
 	}
 
-	finalObserve := func(group *groupState) {
+	finalObserve := func(group *session.Group) {
 		stopTimer(group)
 		memory, messages := group.Runtime.Session.Snapshot()
 		if len(messages) == 0 {
 			return
 		}
-		messages = appendObserveReminder(messages)
+		messages = session.AppendObserveReminder(messages)
 		messages = append(messages, openai.UserMessage("【系统事件】当前 session 因为 20 分钟没有新消息即将结束。你可以做最后一次观察；如果有值得跨 session 保存的信息，可以调用记忆工具更新记忆。除非非常必要，不需要发送群消息。"))
 		callCtx, cancel := observeContext(group, 90*time.Second)
 		defer cancel()
-		if _, err := agent.Observe(callCtx, group.ID, botQQ, group.Prompt, memory, messages); err != nil {
+		if _, err := ag.Observe(callCtx, group.ID, botQQ, group.Prompt, memory, messages); err != nil {
 			log.Printf("final observe failed: group_id=%d err=%v", group.ID, err)
 		}
 	}
@@ -409,19 +289,19 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 				group.Runtime.Observing = false
 			}
 			writeMu.Lock()
-			_ = sendGroupMsgByWS(conn, group.ID, "【有点累了喵，正在放慢脚步重新整理记忆，短期内可能会失明】")
+			_ = onebot.SendGroupMsg(conn, group.ID, "【有点累了喵，正在放慢脚步重新整理记忆，短期内可能会失明】")
 			writeMu.Unlock()
 			finalObserve(group)
 		}
 	}
 
-	startObserve = func(group *groupState) {
+	startObserve = func(group *session.Group) {
 		if group.Runtime.PauseRunning || group.Runtime.PausePending {
 			return
 		}
 		stopTimer(group)
 		memory, messages := group.Runtime.Session.Snapshot()
-		messages = appendObserveReminder(messages)
+		messages = session.AppendObserveReminder(messages)
 		group.Runtime.Observing = true
 		group.Runtime.Dirty = false
 		group.Runtime.Pending = 0
@@ -431,7 +311,7 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 		group.Runtime.ObserveCancel = cancel
 		go func() {
 			defer cancel()
-			added, err := agent.Observe(callCtx, group.ID, botQQ, group.Prompt, memory, messages)
+			added, err := ag.Observe(callCtx, group.ID, botQQ, group.Prompt, memory, messages)
 			observeDone <- observeResult{groupID: group.ID, generation: generation, added: added, err: err}
 		}()
 	}
@@ -466,7 +346,7 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 				}
 			}
 
-			var ev OneBotEvent
+			var ev onebot.Event
 			if err := json.Unmarshal(payload, &ev); err != nil {
 				continue
 			}
@@ -478,18 +358,18 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 				continue
 			}
 
-			text := strings.TrimSpace(extractText(ev))
+			text := strings.TrimSpace(onebot.ExtractText(ev))
 			if text == "" {
 				log.Printf("收到群消息但文本为空：group_id=%d user_id=%d", ev.GroupID, ev.UserID)
 				continue
 			}
-			incoming := RunIncomingHandlers(IncomingGroupMessage{Event: ev, Text: text}, AtBotHandler(botQQ))
+			incoming := incoming.Run(incoming.GroupMessage{Event: ev, Text: text}, incoming.AtBot(botQQ))
 			log.Printf("收到群消息：group_id=%d user_id=%d at_bot=%v text=%q", ev.GroupID, ev.UserID, incoming.AtBot, text)
 			if strings.HasPrefix(text, atPrefix) {
 				switch strings.TrimSpace(text[len(atPrefix):]) {
 				case cmdPing:
 					writeMu.Lock()
-					err := sendGroupMsgByWS(conn, ev.GroupID, "pong")
+					err := onebot.SendGroupMsg(conn, ev.GroupID, "pong")
 					writeMu.Unlock()
 					if err != nil {
 						log.Printf("发送 pong 失败：group_id=%d user_id=%d err=%v", ev.GroupID, ev.UserID, err)
@@ -502,12 +382,16 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 					pauseSession(group)
 					continue
 				case cmdBill:
+					if !b.cfg.IsMaintainer(ev.UserID) {
+						log.Printf("群 %d 非维护者尝试 /bill：user_id=%d", ev.GroupID, ev.UserID)
+						continue
+					}
 					msg, err := bottools.GroupBillText(ev.GroupID)
 					if err != nil {
 						msg = fmt.Sprintf("查询账单失败：%v", err)
 					}
 					writeMu.Lock()
-					err = sendPrivateMsgByWS(conn, ev.UserID, ev.GroupID, msg)
+					err = onebot.SendPrivateMsg(conn, ev.UserID, ev.GroupID, msg)
 					writeMu.Unlock()
 					if err != nil {
 						log.Printf("私发账单失败：group_id=%d user_id=%d err=%v", ev.GroupID, ev.UserID, err)
@@ -518,11 +402,11 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 				}
 			}
 
-			t := eventTime(ev)
+			t := session.EventTime(ev)
 			if !group.Runtime.Observing && group.Runtime.Session.ExpiredAt(t) {
 				log.Printf("群 %d 当前 session 超过 20 分钟无新消息，触发 final observe", group.ID)
 				finalObserve(group)
-				group.Runtime = groupRuntime{Generation: group.Runtime.Generation + 1}
+				group.Runtime = session.Runtime{Generation: group.Runtime.Generation + 1}
 			}
 			group.Runtime.Session.Append(ev, text, group.MemoryFile)
 			group.Runtime.Pending++
@@ -599,105 +483,21 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 				}
 			}
 		case <-configChanged:
-			next, err := loadBotConfig(configPath)
+			next, err := config.Load(configPath)
 			if err != nil {
 				log.Printf("reload go.toml failed: %v", err)
 				continue
 			}
-			reloadGroups(groups, next, stopTimer, finalObserve, func(groupID int64, userID int64) {
+			reloadGroups(b.groups, next, stopTimer, finalObserve, func(groupID int64, userID int64) {
 				writeMu.Lock()
 				defer writeMu.Unlock()
-				if err := pokeGroupMemberByWS(conn, groupID, userID); err != nil {
+				if err := onebot.PokeGroupMember(conn, groupID, userID); err != nil {
 					log.Printf("发送配置变更戳一戳失败：group_id=%d user_id=%d err=%v", groupID, userID, err)
 				}
 			})
+			b.cfg = next
 			cfg = next
 		}
 	}
 }
 
-func watchConfig(ctx context.Context, path string, changed chan<- struct{}) (*fsnotify.Watcher, error) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, err
-	}
-	dir := filepath.Dir(path)
-	name := filepath.Base(path)
-	if err := watcher.Add(dir); err != nil {
-		_ = watcher.Close()
-		return nil, err
-	}
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case event, ok := <-watcher.Events:
-				if !ok {
-					return
-				}
-				if filepath.Base(event.Name) != name {
-					continue
-				}
-				if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
-					select {
-					case changed <- struct{}{}:
-					default:
-					}
-				}
-			case err, ok := <-watcher.Errors:
-				if !ok {
-					return
-				}
-				log.Printf("watch go.toml failed: %v", err)
-			}
-		}
-	}()
-	return watcher, nil
-}
-
-func reloadGroups(groups map[int64]*groupState, cfg *botConfig, stopTimer func(*groupState), finalObserve func(*groupState), pokeMaintainer func(int64, int64)) {
-	next, err := loadGroupStates(cfg)
-	if err != nil {
-		log.Printf("reload groups failed: %v", err)
-		return
-	}
-	for id, group := range groups {
-		if next[id] != nil {
-			continue
-		}
-		stopTimer(group)
-		if !group.Runtime.Observing {
-			finalObserve(group)
-		}
-		if group.Runtime.ObserveCancel != nil {
-			group.Runtime.ObserveCancel()
-		}
-		delete(groups, id)
-		log.Printf("群 %d 已从 go.toml 移除", id)
-	}
-	for id, nextGroup := range next {
-		group := groups[id]
-		if group == nil {
-			groups[id] = nextGroup
-			log.Printf("群 %d 已加入 go.toml", id)
-			continue
-		}
-		promptChanged := group.Prompt != nextGroup.Prompt
-		memoryChanged := group.MemoryFile != nextGroup.MemoryFile
-		if promptChanged || memoryChanged {
-			stopTimer(group)
-			if !group.Runtime.Observing {
-				finalObserve(group)
-			}
-			if group.Runtime.ObserveCancel != nil {
-				group.Runtime.ObserveCancel()
-			}
-			group.Prompt = nextGroup.Prompt
-			group.MemoryFile = nextGroup.MemoryFile
-			group.Runtime = groupRuntime{Generation: group.Runtime.Generation + 1}
-			log.Printf("群 %d 配置已变更，已重启当前对话", id)
-			pokeMaintainer(id, maintainerQQ)
-		}
-	}
-}

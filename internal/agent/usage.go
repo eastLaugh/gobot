@@ -1,4 +1,4 @@
-package app
+package agent
 
 import (
 	"context"
@@ -10,10 +10,18 @@ import (
 	"time"
 )
 
-const (
-	usageDir              = ".run/usage"
-	sessionCostLimitYuan  = 3.0
-)
+const usageDir = ".run/usage"
+
+type TokenUsage struct {
+	GroupID          int64
+	Round            int
+	Model            string
+	PromptTokens     int64
+	CachedTokens     int64
+	CompletionTokens int64
+	TotalTokens      int64
+	CostYuan         float64
+}
 
 type usageRecord struct {
 	Time             string  `json:"time"`
@@ -25,7 +33,7 @@ type usageRecord struct {
 	UncachedTokens   int64   `json:"uncached_tokens"`
 	CompletionTokens int64   `json:"completion_tokens"`
 	TotalTokens      int64   `json:"total_tokens"`
-	CostYuan float64 `json:"cost_yuan"`
+	CostYuan         float64 `json:"cost_yuan"`
 }
 
 func uncachedPromptTokens(prompt, cached int64) int64 {
@@ -41,7 +49,7 @@ func usageCostYuan(prompt, cached, completion int64) float64 {
 	return (float64(uncached)*1 + float64(cached)*0.2 + float64(completion)*2) / 1_000_000
 }
 
-func appendUsageRecord(usage tokenUsage) error {
+func appendUsageRecord(usage TokenUsage) error {
 	if err := os.MkdirAll(usageDir, 0700); err != nil {
 		return err
 	}
@@ -55,7 +63,7 @@ func appendUsageRecord(usage tokenUsage) error {
 		UncachedTokens:   uncachedPromptTokens(usage.PromptTokens, usage.CachedTokens),
 		CompletionTokens: usage.CompletionTokens,
 		TotalTokens:      usage.TotalTokens,
-		CostYuan: usage.CostYuan,
+		CostYuan:         usage.CostYuan,
 	}
 	b, err := json.Marshal(rec)
 	if err != nil {
@@ -73,25 +81,38 @@ func appendUsageRecord(usage tokenUsage) error {
 	return nil
 }
 
-type observeUsageAcc struct {
+type ObserveUsageAcc struct {
 	GroupID          int64
 	CostYuan         float64
 	PromptTokens     int64
 	CachedTokens     int64
 	CompletionTokens int64
-	TotalTokens int64
+	TotalTokens      int64
 }
 
 type observeUsageKey struct{}
 
-func withObserveUsage(ctx context.Context, acc *observeUsageAcc) context.Context {
+func WithObserveUsage(ctx context.Context, acc *ObserveUsageAcc) context.Context {
 	return context.WithValue(ctx, observeUsageKey{}, acc)
 }
 
-func accumulateUsage(ctx context.Context, usage tokenUsage) tokenUsage {
+type tokenUsageReporterKey struct{}
+
+func WithTokenUsageReporter(ctx context.Context, report func(TokenUsage)) context.Context {
+	return context.WithValue(ctx, tokenUsageReporterKey{}, report)
+}
+
+func reportTokenUsage(ctx context.Context, usage TokenUsage) {
+	report, ok := ctx.Value(tokenUsageReporterKey{}).(func(TokenUsage))
+	if ok {
+		report(usage)
+	}
+}
+
+func AccumulateUsage(ctx context.Context, usage TokenUsage) TokenUsage {
 	cost := usageCostYuan(usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 	usage.CostYuan = cost
-	if acc, ok := ctx.Value(observeUsageKey{}).(*observeUsageAcc); ok && acc != nil {
+	if acc, ok := ctx.Value(observeUsageKey{}).(*ObserveUsageAcc); ok && acc != nil {
 		acc.CostYuan += cost
 		acc.PromptTokens += usage.PromptTokens
 		acc.CachedTokens += usage.CachedTokens
@@ -101,7 +122,7 @@ func accumulateUsage(ctx context.Context, usage tokenUsage) tokenUsage {
 	return usage
 }
 
-func logUsageRecord(usage tokenUsage) {
+func LogUsageRecord(usage TokenUsage) {
 	if err := appendUsageRecord(usage); err != nil {
 		log.Printf("写入 token 用量失败：group_id=%d err=%v", usage.GroupID, err)
 	}
