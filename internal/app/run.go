@@ -260,7 +260,7 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 		stopTimer(group)
 		group.Runtime.TimerSeq++
 		seq := group.Runtime.TimerSeq
-		delay := coldDelay(group.Runtime.Pending) - time.Since(group.Runtime.PendingLastAt)
+		delay := coldDelay(group.Runtime.Pending, group.Runtime.PendingAtBot) - time.Since(group.Runtime.PendingLastAt)
 		if delay < 0 {
 			delay = 0
 		}
@@ -425,6 +425,7 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 		group.Runtime.Observing = true
 		group.Runtime.Dirty = false
 		group.Runtime.Pending = 0
+		group.Runtime.PendingAtBot = false
 		generation := group.Runtime.Generation
 		callCtx, cancel := observeContext(group, 90*time.Second)
 		group.Runtime.ObserveCancel = cancel
@@ -482,7 +483,8 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 				log.Printf("收到群消息但文本为空：group_id=%d user_id=%d", ev.GroupID, ev.UserID)
 				continue
 			}
-			log.Printf("收到群消息：group_id=%d user_id=%d text=%q", ev.GroupID, ev.UserID, text)
+			incoming := RunIncomingHandlers(IncomingGroupMessage{Event: ev, Text: text}, AtBotHandler(botQQ))
+			log.Printf("收到群消息：group_id=%d user_id=%d at_bot=%v text=%q", ev.GroupID, ev.UserID, incoming.AtBot, text)
 			if strings.HasPrefix(text, atPrefix) {
 				switch strings.TrimSpace(text[len(atPrefix):]) {
 				case cmdPing:
@@ -525,12 +527,20 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 			group.Runtime.Session.Append(ev, text, group.MemoryFile)
 			group.Runtime.Pending++
 			group.Runtime.PendingLastAt = time.Now()
+			if incoming.AtBot {
+				group.Runtime.PendingAtBot = true
+			}
 			if group.Runtime.Observing {
 				group.Runtime.Dirty = true
 				continue
 			}
 			if group.Runtime.Pending >= 5 {
 				log.Printf("群 %d 已攒够 %d 条消息，触发模型观察", group.ID, group.Runtime.Pending)
+				startObserve(group)
+				continue
+			}
+			if group.Runtime.PendingAtBot {
+				log.Printf("群 %d 消息 @ 了 bot，立即触发模型观察", group.ID)
 				startObserve(group)
 				continue
 			}
@@ -580,6 +590,9 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 				group.Runtime.Dirty = false
 				if group.Runtime.Pending >= 5 {
 					log.Printf("群 %d 取消期间已攒够 %d 条消息，触发模型观察", group.ID, group.Runtime.Pending)
+					startObserve(group)
+				} else if group.Runtime.PendingAtBot {
+					log.Printf("群 %d 观察期间收到 @，立即再次观察", group.ID)
 					startObserve(group)
 				} else {
 					resetTimer(group)

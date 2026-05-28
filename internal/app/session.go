@@ -44,6 +44,7 @@ type groupRuntime struct {
 	Observing          bool
 	Dirty              bool
 	Pending            int
+	PendingAtBot       bool
 	PendingLastAt      time.Time
 	ObserveCancel      context.CancelFunc
 	Generation         int64
@@ -126,7 +127,10 @@ func (s *chatSession) AppendMessages(messages []openai.ChatCompletionMessagePara
 	s.Messages = append(s.Messages, messages...)
 }
 
-func coldDelay(pending int) time.Duration {
+func coldDelay(pending int, atBot bool) time.Duration {
+	if atBot {
+		return 0
+	}
 	if pending == 1 {
 		return 6 * time.Second
 	}
