@@ -68,6 +68,11 @@ func newChatAgent(openAIBaseURL, openAIAPIKey, openAIModel string, systemPrompt 
 		bottools.SendGroupMessage, "向当前 QQ 群发送一条群友可见的消息。调用前要确认不是刷屏，并在参数里显式声明。一条群消息由一个气泡承载，大概 6 个气泡就占用一个屏幕。因此不宜连续调用超过 3次。",
 		bottools.SendGroupTempPrivate, "向当前群内某位群友发送群临时私聊（经本群发起，无需加好友）。仅用于单独输出信息；主人不会阅读。不要代替群聊回复。",
 		bottools.QueryGroupBilling, "查询 QQ 群 token 账单。默认查当前群累计费用；可设 AllGroups 查看所有群的累计花费。数据来自持久化的按群计费记录。",
+		bottools.RecallUndercover, "玩谁是卧底前请先回忆。返回裁判纪律（纯文本，不发群）。",
+		bottools.RecallWerewolf, "玩狼人杀前请先回忆。返回上帝纪律（纯文本，不发群）。",
+		bottools.SendLaughBroken, "向当前群发送「笑烂了」梗图（内置图片，一条群消息）。",
+		bottools.SendNiYiJiKu, "向当前群发送「你已急哭」梗图（内置图片，一条群消息）。",
+		bottools.SendBuYao, "向当前群发送「不要」卖萌梗图（内置图片，一条群消息）。",
 	)
 	tools.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	return &chatAgent{client: &client, model: openAIModel, systemPrompt: systemPrompt, registry: registry}

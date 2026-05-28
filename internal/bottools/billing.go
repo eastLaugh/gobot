@@ -10,21 +10,31 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const usageDir = ".run/usage"
 
 type usageRecord struct {
+	Time         string  `json:"time"`
 	CostYuan     float64 `json:"cost_yuan"`
 	TotalTokens  int64   `json:"total_tokens"`
 	PromptTokens int64   `json:"prompt_tokens"`
 }
 
+type dayBilling struct {
+	Date        string
+	TotalYuan   float64
+	RecordCount int
+	TotalTokens int64
+}
+
 type groupBilling struct {
-	GroupID      int64
-	TotalYuan    float64
-	RecordCount  int
-	TotalTokens  int64
+	GroupID     int64
+	TotalYuan   float64
+	RecordCount int
+	TotalTokens int64
+	ByDay       []dayBilling
 }
 
 type groupIDKey struct{}
@@ -38,6 +48,17 @@ func groupIDFromContext(ctx context.Context) (int64, bool) {
 	return id, ok && id > 0
 }
 
+func recordDate(timeStr string) string {
+	if timeStr == "" {
+		return "（无日期）"
+	}
+	t, err := time.Parse(time.RFC3339, timeStr)
+	if err != nil {
+		return "（无日期）"
+	}
+	return t.Format("2006-01-02")
+}
+
 func sumGroupBillingFile(path string) (groupBilling, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -49,6 +70,7 @@ func sumGroupBillingFile(path string) (groupBilling, error) {
 	defer f.Close()
 
 	var sum groupBilling
+	dayMap := make(map[string]*dayBilling)
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -62,8 +84,27 @@ func sumGroupBillingFile(path string) (groupBilling, error) {
 		sum.TotalYuan += rec.CostYuan
 		sum.TotalTokens += rec.TotalTokens
 		sum.RecordCount++
+
+		date := recordDate(rec.Time)
+		d := dayMap[date]
+		if d == nil {
+			d = &dayBilling{Date: date}
+			dayMap[date] = d
+		}
+		d.TotalYuan += rec.CostYuan
+		d.TotalTokens += rec.TotalTokens
+		d.RecordCount++
 	}
-	return sum, sc.Err()
+	if err := sc.Err(); err != nil {
+		return groupBilling{}, err
+	}
+	for _, d := range dayMap {
+		sum.ByDay = append(sum.ByDay, *d)
+	}
+	sort.Slice(sum.ByDay, func(i, j int) bool {
+		return sum.ByDay[i].Date < sum.ByDay[j].Date
+	})
+	return sum, nil
 }
 
 func loadGroupBilling(groupID int64) (groupBilling, error) {
@@ -112,7 +153,16 @@ func loadAllGroupBillings() ([]groupBilling, float64, error) {
 }
 
 func formatGroupBilling(b groupBilling) string {
-	return fmt.Sprintf("群 %d：累计 %.4f 元，%d 次调用，共 %d tokens", b.GroupID, b.TotalYuan, b.RecordCount, b.TotalTokens)
+	var s strings.Builder
+	fmt.Fprintf(&s, "群 %d\n", b.GroupID)
+	fmt.Fprintf(&s, "累计：%.4f 元，%d 次调用，共 %d tokens\n", b.TotalYuan, b.RecordCount, b.TotalTokens)
+	if len(b.ByDay) > 0 {
+		s.WriteString("\n按日：\n")
+		for _, d := range b.ByDay {
+			fmt.Fprintf(&s, "  %s  %.4f 元  %d 次  %d tokens\n", d.Date, d.TotalYuan, d.RecordCount, d.TotalTokens)
+		}
+	}
+	return strings.TrimRight(s.String(), "\n")
 }
 
 func GroupBillText(groupID int64) (string, error) {
@@ -138,12 +188,14 @@ func QueryGroupBilling(ctx context.Context, args *struct {
 			return "暂无账单记录（.run/usage 下没有数据）。"
 		}
 		var b strings.Builder
-		b.WriteString("各群累计账单（自进程有记录以来，按 .run/usage 持久化汇总）：\n")
-		for _, item := range list {
+		b.WriteString("各群累计账单（自进程有记录以来，按 .run/usage 持久化汇总）：\n\n")
+		for i, item := range list {
+			if i > 0 {
+				b.WriteString("\n\n")
+			}
 			b.WriteString(formatGroupBilling(item))
-			b.WriteByte('\n')
 		}
-		fmt.Fprintf(&b, "全部合计：%.4f 元", grand)
+		fmt.Fprintf(&b, "\n\n全部合计：%.4f 元", grand)
 		return b.String()
 	}
 	groupID, ok := groupIDFromContext(ctx)
@@ -157,5 +209,5 @@ func QueryGroupBilling(ctx context.Context, args *struct {
 	if sum.RecordCount == 0 {
 		return fmt.Sprintf("群 %d 暂无账单记录。", groupID)
 	}
-	return formatGroupBilling(sum) + "（数据来自 .run/usage 持久化记录）"
+	return formatGroupBilling(sum) + "\n（数据来自 .run/usage 持久化记录）"
 }

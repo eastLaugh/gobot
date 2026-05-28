@@ -505,12 +505,12 @@ func consumeOnce(ctx context.Context, sig <-chan os.Signal, configPath string, c
 						msg = fmt.Sprintf("查询账单失败：%v", err)
 					}
 					writeMu.Lock()
-					err = sendGroupMsgByWS(conn, ev.GroupID, msg)
+					err = sendPrivateMsgByWS(conn, ev.UserID, ev.GroupID, msg)
 					writeMu.Unlock()
 					if err != nil {
-						log.Printf("发送账单失败：group_id=%d user_id=%d err=%v", ev.GroupID, ev.UserID, err)
+						log.Printf("私发账单失败：group_id=%d user_id=%d err=%v", ev.GroupID, ev.UserID, err)
 					} else {
-						log.Printf("已回复账单：group_id=%d user_id=%d", ev.GroupID, ev.UserID)
+						log.Printf("已私发账单：group_id=%d user_id=%d", ev.GroupID, ev.UserID)
 					}
 					continue
 				}
